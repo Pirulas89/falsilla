@@ -1,0 +1,609 @@
+1. Single Table (Una sola tabla)
+Es la estrategia por defecto. Todas las clases de la jerarquía se guardan en la misma tabla. Se usa una columna especial llamada Discriminator para saber a qué subclase pertenece cada fila.
+
+Pros: Muy rápida para consultas (no hay JOINs).
+
+Contras: Las columnas de las subclases deben permitir valores nulos (NULL), ya que una fila de la "Clase A" tendrá vacíos los campos de la "Clase B".
+
+Java
+@Entity
+@Inheritance(strategy = InheritanceType.SINGLE_TABLE)
+@DiscriminatorColumn(name = "tipo_usuario")
+public class Usuario {
+    @Id @GeneratedValue private Long id;
+    private String nombre;
+}
+
+@Entity
+@DiscriminatorValue("ADMIN")
+public class Administrador extends Usuario {
+    private String claveSeguridad;
+}
+2. Joined Table (Tablas unidas)
+Cada clase tiene su propia tabla. La tabla de la subclase solo contiene sus atributos específicos y una Llave Primaria que es también Llave Foránea hacia la tabla padre.
+
+Pros: Base de datos normalizada, no hay columnas con nulos innecesarios.
+
+Contras: Consultar requiere hacer JOIN, lo que puede ser lento si la jerarquía es muy profunda.
+
+Java
+@Entity
+@Inheritance(strategy = InheritanceType.JOINED)
+public class Vehiculo {
+    @Id @GeneratedValue private Long id;
+    private String marca;
+}
+
+@Entity
+public class Coche extends Vehiculo {
+    private int numeroPuertas;
+}
+3. Table Per Class (Una tabla por cada clase concreta)
+Cada subclase tiene su propia tabla con todos los campos (los suyos y los que hereda del padre). La clase padre no suele tener tabla propia si es abstracta.
+
+Pros: Consultas directas a una subclase son muy rápidas.
+
+Contras: Si haces una consulta sobre la clase padre (ej. "buscar todos los vehículos"), Hibernate tiene que hacer un UNION de todas las tablas, lo cual es muy costoso.
+
+Java
+@Entity
+@Inheritance(strategy = InheritanceType.TABLE_PER_CLASS)
+public abstract class Animal {
+    @Id private Long id; // No se recomienda usar IDENTITY aquí
+    private String nombre;
+}
+
+@Entity
+public class Perro extends Animal {
+    private String raza;
+}
+
+
+
+
+1. La Clase Padre (Producto)
+Java
+package com.hibernate.gui.model;
+
+import jakarta.persistence.*;
+import lombok.*;
+
+@Entity
+@Table(name = "producto")
+@Inheritance(strategy = InheritanceType.JOINED) // <--- Estrategia de herencia
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+public class Producto {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private int id;
+
+    private String nombre;
+    private double precio;
+}
+2. La Clase Hija (ProductoPerecedero)
+Esta clase hereda de Producto y añade su propio atributo. Hibernate creará una tabla aparte conectada por el id.
+
+Java
+package com.hibernate.gui.model;
+
+import jakarta.persistence.*;
+import lombok.*;
+
+@Entity
+@Table(name = "producto_perecedero")
+@Data
+@EqualsAndHashCode(callSuper = true) // Importante para que Lombok considere al padre
+@NoArgsConstructor
+public class ProductoPerecedero extends Producto {
+
+    private String fechaCaducidad;
+
+    // Constructor útil
+    public ProductoPerecedero(String nombre, double precio, String fechaCaducidad) {
+        this.setNombre(nombre);
+        this.setPrecio(precio);
+        this.fechaCaducidad = fechaCaducidad;
+    }
+}
+3. La Clase de Conexión (ProductoConection)
+¡Ojo aquí! Debes registrar AMBAS clases para que Hibernate entienda la relación.
+
+Java
+package com.hibernate.gui.util;
+
+import org.hibernate.SessionFactory;
+import org.hibernate.cfg.Configuration;
+import com.hibernate.gui.model.*;
+
+public class ProductoConection {
+    private static SessionFactory sessionFactory;
+
+    public static SessionFactory getSessionFactory() {
+        if (sessionFactory == null) {
+            Configuration config = new Configuration();
+            config.configure("hibernate.cfg.xml");
+            
+            // REGISTRAMOS PADRE E HIJA
+            config.addAnnotatedClass(Producto.class);
+            config.addAnnotatedClass(ProductoPerecedero.class);
+            
+            sessionFactory = config.buildSessionFactory();
+        }
+        return sessionFactory;
+    }
+}
+
+4. Ejemplo de uso (Main o DAO)
+Lo bonito de la herencia es que puedes guardar un ProductoPerecedero y luego buscarlo como un Producto genérico.
+
+Java
+public void guardarEjemplo() {
+    Session session = ProductoConection.getSessionFactory().openSession();
+    Transaction tx = session.beginTransaction();
+
+    // Creamos un producto hijo
+    ProductoPerecedero leche = new ProductoPerecedero("Leche Entera", 1.20, "2026-05-01");
+
+    session.persist(leche); // Hibernate insertará en 'producto' y en 'producto_perecedero' automáticamente
+    
+    tx.commit();
+    session.close();
+}
+
+Java
+@Entity
+@Table(name = "agotados")
+public class ProductoAgotado {
+    @Id
+    private int id; // Este será el mismo ID que el del producto
+
+    @OneToOne
+    @MapsId 
+    @JoinColumn(name = "id_producto")
+    private Producto producto;
+}
+
+if (!producto.isTieneStock()) {
+    String sql = "INSERT INTO agotados (id_producto) VALUES (:id)";
+    session.createNativeQuery(sql)
+           .setParameter("id", producto.getId())
+           .executeUpdate();
+}
+
+public void actualizarStock(int productoId, boolean tieneStock) {
+    Session session = ProductoConection.getSessionFactory().openSession();
+    Transaction tx = session.beginTransaction();
+
+    // 1. Buscamos el producto
+    Producto producto = session.get(Producto.class, productoId);
+    producto.setTieneStock(tieneStock);
+
+    if (!tieneStock) {
+        // 2. Si no hay stock, creamos el "marcado" en la otra tabla
+        ProductoAgotado agotado = new ProductoAgotado();
+        agotado.setProducto(producto); // Vinculamos ambos
+        session.persist(agotado); 
+    } else {
+        // 3. Si vuelve a haber stock, borramos el registro de la tabla Agotados
+        ProductoAgotado agotado = session.get(ProductoAgotado.class, productoId);
+        if (agotado != null) {
+            session.remove(agotado);
+        }
+    }
+
+    tx.commit();
+    session.close();
+}
+
+2. Opción con SQL Nativo (Si no quieres mapear la relación)
+Si prefieres no complicarte con objetos y solo quieres que al agotarse se inserte el ID en la segunda tabla por "fuerza bruta":
+
+Java
+public void marcarComoAgotado(int id) {
+    Session session = ProductoConection.getSessionFactory().openSession();
+    Transaction tx = session.beginTransaction();
+
+    // Actualizamos la tabla principal
+    session.createNativeQuery("UPDATE producto SET tieneStock = false WHERE id = :id")
+           .setParameter("id", id)
+           .executeUpdate();
+
+    // Insertamos en la tabla de agotados (solo el ID)
+    // Usamos IGNORE por si ya estaba insertado antes
+    session.createNativeQuery("INSERT IGNORE INTO agotados (id_producto) VALUES (:id)")
+           .setParameter("id", id)
+           .executeUpdate();
+
+    tx.commit();
+    session.close();
+}
+
+
+
+@Entity
+@Table(name = "empleados") // Nombre de la tabla en MySQL
+@Inheritance(strategy = InheritanceType.JOINED)
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+public abstract class Empleado {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @Column(name = "id_empleado") // Nombre de la columna ID
+    private int id;
+
+    @Column(name = "nombre_completo", nullable = false, length = 100)
+    private String nombre;
+
+    @Column(name = "sueldo_base")
+    private double sueldoBase;
+}
+
+@Entity
+@Table(name = "comerciales")
+@Data
+@EqualsAndHashCode(callSuper = true)
+public class Comercial extends Empleado {
+
+    @Column(name = "comision_ventas")
+    private double comision;
+}
+
+@Entity
+@Table(name = "repartidores")
+@Data
+@EqualsAndHashCode(callSuper = true)
+public class Repartidor extends Empleado {
+
+    @Column(name = "zona_reparto", length = 50)
+    private String zona;
+}
+
+package com.hibernate.gui;
+
+import java.util.List;
+import org.hibernate.Session;
+import org.hibernate.Transaction;
+import com.hibernate.gui.model.*;
+import com.hibernate.gui.util.HibernateUtil;
+
+public class AppGestionEmpleados {
+
+    public static void main(String[] args) {
+        
+        // 1. CREACIÓN DE OBJETOS (Aquí es donde decides qué es cada uno)
+        Comercial c1 = new Comercial();
+        c1.setNombre("Ana García");
+        c1.setSueldoBase(1500.0);
+        c1.setComision(400.0);
+
+        Repartidor r1 = new Repartidor();
+        r1.setNombre("Juan Pérez");
+        r1.setSueldoBase(1100.0);
+        r1.setZona("Norte");
+
+        // 2. GUARDADO EN BASE DE DATOS
+        try (Session session = HibernateUtil.getSessionFactory().openSession()) {
+            Transaction tx = session.beginTransaction();
+            
+            session.persist(c1);
+            session.persist(r1);
+            
+            tx.commit();
+            System.out.println("--- Empleados guardados correctamente ---\n");
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
+        // 3. RECUPERACIÓN Y POLIMORFISMO
+        try (Session session = HibernateUtil.getSessionFactory().openSession()) {
+            
+            // Pedimos una lista de la clase PADRE (Empleado)
+            List<Empleado> lista = session.createQuery("from Empleado", Empleado.class).list();
+
+            System.out.println("LISTADO DE NÓMINAS:");
+            System.out.println("-------------------");
+
+            for (Empleado e : lista) {
+                // Aquí es donde ocurre la magia del instanceof
+                if (e instanceof Comercial com) {
+                    double total = com.getSueldoBase() + com.getComision();
+                    System.out.println("[COMERCIAL] " + com.getNombre() + 
+                                     " | Sueldo Total: " + total + "€");
+                } 
+                else if (e instanceof Repartidor rep) {
+                    System.out.println("[REPARTIDOR] " + rep.getNombre() + 
+                                     " | Zona: " + rep.getZona() + 
+                                     " | Sueldo: " + rep.getSueldoBase() + "€");
+                }
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+}
+
+import java.sql.*;
+
+public class RegistroCompletoEscuela {
+
+    static final String URL = "jdbc:mysql://localhost:3306/escuela";
+    static final String USER = "root";
+    static final String PASS = "admin";
+
+    public static void main(String[] args) {
+        
+        try (Connection conn = DriverManager.getConnection(URL, USER, PASS)) {
+            conn.setAutoCommit(false); // TRASACCION: O se guarda todo o nada
+
+            // 1. CREAR EL CURSO Y RECUPERAR SU ID
+            String sqlCurso = "INSERT INTO cursos (titulo) VALUES (?)";
+            int idCurso = -1;
+            try (PreparedStatement ps = conn.prepareStatement(sqlCurso, Statement.RETURN_GENERATED_KEYS)) {
+                ps.setString(1, "Programación Java 101");
+                ps.executeUpdate();
+                ResultSet rs = ps.getGeneratedKeys();
+                if (rs.next()) idCurso = rs.getInt(1);
+            }
+
+            // 2. CREAR EL ESTUDIANTE Y RECUPERAR SU ID
+            String sqlEst = "INSERT INTO estudiantes (nombre) VALUES (?)";
+            int idEstudiante = -1;
+            try (PreparedStatement ps = conn.prepareStatement(sqlEst, Statement.RETURN_GENERATED_KEYS)) {
+                ps.setString(1, "Lucía Fernández");
+                ps.executeUpdate();
+                ResultSet rs = ps.getGeneratedKeys();
+                if (rs.next()) idEstudiante = rs.getInt(1);
+            }
+
+            // 3. UNIRLOS EN LA TABLA INTERMEDIA (La "relación")
+            if (idCurso != -1 && idEstudiante != -1) {
+                String sqlRelacion = "INSERT INTO estudiantes_cursos (id_estudiante, id_curso) VALUES (?, ?)";
+                try (PreparedStatement ps = conn.prepareStatement(sqlRelacion)) {
+                    ps.setInt(1, idEstudiante);
+                    ps.setInt(2, idCurso);
+                    ps.executeUpdate();
+                }
+                System.out.println("Inscripción completada: Lucía en Programación Java.");
+            }
+
+            conn.commit(); // Confirmamos todos los cambios a la vez
+            
+            // 4. CONSULTA FINAL PARA COMPROBAR
+            mostrarDatos(conn, idEstudiante);
+
+        } catch (SQLException e) {
+            System.err.println("Error, haciendo rollback: " + e.getMessage());
+        }
+    }
+
+    private static void mostrarDatos(Connection conn, int idEst) throws SQLException {
+        String sql = "SELECT e.nombre, c.titulo FROM estudiantes e " +
+                     "JOIN estudiantes_cursos ec ON e.id = ec.id_estudiante " +
+                     "JOIN cursos c ON c.id = ec.id_curso " +
+                     "WHERE e.id = ?";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, idEst);
+            ResultSet rs = ps.executeQuery();
+            while (rs.next()) {
+                System.out.println("Resultado: " + rs.getString("nombre") + " -> " + rs.getString("titulo"));
+            }
+        }
+    }
+}
+
+1. Relación Muchos a Muchos (N:M)Es la que más "magia" hace. Hibernate gestiona la tabla intermedia por ti. Solo necesitas la anotación @ManyToMany.En Java:Java@Entity
+public class Estudiante {
+    @Id @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private int id;
+
+    @ManyToMany(cascade = CascadeType.ALL)
+    @JoinTable(
+        name = "estudiantes_cursos", // Nombre de la tabla intermedia
+        joinColumns = @JoinColumn(name = "id_estudiante"),
+        inverseJoinColumns = @JoinColumn(name = "id_curso")
+    )
+    private List<Curso> cursos = new ArrayList<>();
+}
+Cómo se guarda:JavaCurso java = new Curso("Java 101");
+estudiante.getCursos().add(java);
+
+session.persist(estudiante); // Hibernate inserta el alumno, el curso Y la relación.
+2. Relación 1 a Muchos (1:N)Es la más común (ej: Departamento $\rightarrow$ Empleados). Aquí usamos @OneToMany y @ManyToOne.En Java:Java@Entity
+public class Departamento {
+    @Id @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private int id;
+
+    @OneToMany(mappedBy = "departamento", cascade = CascadeType.ALL)
+    private List<Empleado> empleados;
+}
+
+@Entity
+public class Empleado {
+    @Id @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private int id;
+
+    @ManyToOne
+    @JoinColumn(name = "id_departamento") // Aquí se crea la FK
+    private Departamento departamento;
+}
+3. Relación 1 a 1 (1:1)Un objeto tiene exactamente otro objeto (ej: Usuario $\rightarrow$ Perfil).En Java:Java@Entity
+public class Usuario {
+    @Id @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private int id;
+
+    @OneToOne(cascade = CascadeType.ALL)
+    @JoinColumn(name = "id_perfil") // La FK se guarda en la tabla usuario
+    private Perfil perfil;
+}
+
+1. Validaciones de Presencia (Las más usadas)
+Son las reinas de cualquier formulario o entidad.
+
+@NotNull: El valor no puede ser nulo, pero sí puede estar vacío. (Ej: un String "" o una lista [] pasan la validación).
+
+@NotEmpty: No puede ser nulo ni tener tamaño 0. Se usa para Strings, Colecciones o Arrays.
+
+@NotBlank: (Solo para Strings). El nivel más alto. No puede ser nulo, no puede estar vacío y no puede tener solo espacios en blanco ("  " falla).
+
+2. Validaciones Numéricas
+@Min(valor) y @Max(valor): Define los límites numéricos (enteros).
+
+@DecimalMin("valor") y @DecimalMax("valor"): Para números con decimales (double, BigDecimal).
+
+@Positive / @PositiveOrZero: Asegura que el número sea mayor (o igual) a cero.
+
+@Negative / @NegativeOrZero: Lo mismo pero para números negativos.
+
+3. Validaciones de Texto y Formato
+@Size(min=x, max=y): Controla la longitud de un String o el número de elementos de una lista.
+
+@Email: Comprueba que el texto tenga un formato de correo electrónico válido (que tenga @, punto, etc.).
+
+@Pattern(regexp = "..."): La más potente. Validas usando Expresiones Regulares (ej: para un DNI o un teléfono específico).
+
+4. Validaciones de Fecha
+@Past / @PastOrPresent: La fecha debe ser anterior a hoy (ej: fecha de nacimiento).
+
+@Future / @FutureOrPresent: La fecha debe ser posterior a hoy (ej: fecha de una reserva o caducidad).
+
+
+
+// PADRE: Usuario
+@Entity
+@Table(name = "usuarios")
+@Inheritance(strategy = InheritanceType.JOINED)
+@Data
+public abstract class Usuario {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private int id;
+
+    @NotBlank(message = "El nombre no puede estar vacío")
+    private String nombre;
+
+    @Email(message = "Formato de email inválido")
+    private String email;
+}
+
+// HIJO: Veterinario
+@Entity
+@Table(name = "veterinarios")
+@Data @EqualsAndHashCode(callSuper = true)
+public class Veterinario extends Usuario {
+    
+    @Pattern(regexp = "COL-\\d{5}", message = "El colegiado debe ser COL- seguido de 5 números")
+    private String numColegiado;
+    
+    private String especialidad;
+}
+
+// HIJO: Cliente
+@Entity
+@Table(name = "clientes")
+@Data @EqualsAndHashCode(callSuper = true)
+public class Cliente extends Usuario {
+    private String telefono;
+    
+    @OneToMany(mappedBy = "dueño", cascade = CascadeType.ALL)
+    private List<Mascota> mascotas = new ArrayList<>();
+}
+
+// MASCOTA y su RELACIÓN 1:1
+@Entity
+@Table(name = "mascotas")
+@Data
+public class Mascota {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private int id;
+
+    @NotBlank(message = "La mascota debe tener nombre")
+    private String nombre;
+
+    @Positive(message = "El peso debe ser mayor a 0")
+    private double peso;
+
+    @ManyToOne
+    @JoinColumn(name = "id_cliente")
+    private Cliente dueño;
+
+    @OneToOne(cascade = CascadeType.ALL)
+    @JoinColumn(name = "id_expediente")
+    private ExpedienteClinico expediente;
+}
+
+
+public class ClinicaService {
+
+    public void registrarCitaRapida(int clienteId, String nombreMascota, double peso, int vetId) throws Exception {
+        Session session = HibernateUtil.getSessionFactory().openSession();
+        Transaction tx = null;
+
+        try {
+            tx = session.beginTransaction();
+
+            // 1. Recuperar Cliente y Veterinario
+            Cliente cliente = session.get(Cliente.class, clienteId);
+            Veterinario vet = session.get(Veterinario.class, vetId);
+
+            if (cliente == null || vet == null) throw new Exception("Cliente o Vet no existen");
+
+            // 2. Crear Expediente (1:1)
+            ExpedienteClinico exp = new ExpedienteClinico();
+            exp.setFechaCreacion(LocalDate.now());
+            exp.setHistorial("Alta inicial en el sistema.");
+
+            // 3. Crear Mascota vinculada
+            Mascota mascota = new Mascota();
+            mascota.setNombre(nombreMascota);
+            mascota.setPeso(peso);
+            mascota.setDueño(cliente);
+            mascota.setExpediente(exp);
+
+            // 4. VALIDACIÓN MANUAL ANTES DE GUARDAR
+            ValidatorFactory factory = Validation.buildDefaultValidatorFactory();
+            Validator validator = factory.getValidator();
+            Set<ConstraintViolation<Mascota>> violations = validator.validate(mascota);
+
+            if (!violations.isEmpty()) {
+                throw new Exception("Validación fallida: " + violations.iterator().next().getMessage());
+            }
+
+            // 5. Persistir (Hibernate guarda Mascota y Expediente por el Cascade)
+            session.persist(mascota);
+
+            tx.commit(); // O todo o nada
+            System.out.println("Éxito: Mascota y Expediente creados.");
+
+        } catch (Exception e) {
+            if (tx != null) tx.rollback(); // ¡SI FALLA ALGO, VOLVEMOS ATRÁS!
+            System.err.println("Error en la operación: " + e.getMessage());
+            throw e;
+        } finally {
+            session.close();
+        }
+    }
+}
+
+@Entity
+@Table(name = "expedientes_clinicos")
+@Data
+public class ExpedienteClinico {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private int id;
+
+    private LocalDate fechaCreacion;
+
+    @Column(columnDefinition = "TEXT") // Para que quepa mucho texto
+    private String historial;
+
+    // Relación inversa (opcional) para saber de qué mascota es
+    @OneToOne(mappedBy = "expediente")
+    private Mascota mascota;
+}
