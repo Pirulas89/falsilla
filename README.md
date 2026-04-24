@@ -36,3 +36,11 @@ JTextArea area = new JTextArea();
 area.setText("Hola");
 area.setEditable(false); // bloquear edición
 area.setEnabled(false);
+
+🎚️ JSlider
+
+Selector con rango
+JSlider slider = new JSlider(0, 100, 50);
+slider.setEnabled(false);
+
+int valor = slider.getValue();
